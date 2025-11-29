@@ -6,55 +6,57 @@ import "./App.css";
 import { useAccount } from 'wagmi';
 import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
 
-interface QuizData {
-  id: string;
-  title: string;
+interface QuizQuestion {
+  id: number;
   question: string;
   options: string[];
-  encryptedAnswer: string;
-  publicValue1: number;
-  publicValue2: number;
+  correctAnswer: number;
+  encryptedAnswer?: string;
+  isVerified?: boolean;
+  decryptedValue?: number;
   creator: string;
   timestamp: number;
-  isVerified: boolean;
-  decryptedValue: number;
-  score: number;
+  publicValue1: number;
+  publicValue2: number;
 }
 
 const App: React.FC = () => {
   const { address, isConnected } = useAccount();
   const [loading, setLoading] = useState(true);
-  const [quizzes, setQuizzes] = useState<QuizData[]>([]);
+  const [quizzes, setQuizzes] = useState<QuizQuestion[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [creatingQuiz, setCreatingQuiz] = useState(false);
   const [transactionStatus, setTransactionStatus] = useState<{ visible: boolean; status: "pending" | "success" | "error"; message: string; }>({ 
     visible: false, 
-    status: "pending", 
+    status: "pending" as const, 
     message: "" 
   });
   const [newQuizData, setNewQuizData] = useState({ 
-    title: "", 
     question: "", 
-    options: ["", "", "", ""], 
-    answer: 0 
+    option1: "", 
+    option2: "", 
+    option3: "", 
+    option4: "",
+    correctAnswer: 0
   });
-  const [selectedQuiz, setSelectedQuiz] = useState<QuizData | null>(null);
-  const [userAnswer, setUserAnswer] = useState<number | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [isDecrypting, setIsDecrypting] = useState(false);
-  const [contractAddress, setContractAddress] = useState("");
-  const [fhevmInitializing, setFhevmInitializing] = useState(false);
-  const [scoreboard, setScoreboard] = useState<{user: string, score: number}[]>([]);
+  const [selectedQuiz, setSelectedQuiz] = useState<QuizQuestion | null>(null);
+  const [userAnswers, setUserAnswers] = useState<{[key: number]: number}>({});
+  const [score, setScore] = useState(0);
+  const [showRanking, setShowRanking] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
+  const [userHistory, setUserHistory] = useState<any[]>([]);
+  const [contractAddress, setContractAddress] = useState("");
 
   const { status, initialize, isInitialized } = useFhevm();
   const { encrypt, isEncrypting } = useEncrypt();
   const { verifyDecryption, isDecrypting: fheIsDecrypting } = useDecrypt();
+  const [fhevmInitializing, setFhevmInitializing] = useState(false);
 
   useEffect(() => {
     const initFhevmAfterConnection = async () => {
-      if (!isConnected || isInitialized || fhevmInitializing) return;
+      if (!isConnected) return;
+      if (isInitialized || fhevmInitializing) return;
       
       try {
         setFhevmInitializing(true);
@@ -104,24 +106,22 @@ const App: React.FC = () => {
       if (!contract) return;
       
       const businessIds = await contract.getAllBusinessIds();
-      const quizzesList: QuizData[] = [];
+      const quizzesList: QuizQuestion[] = [];
       
       for (const businessId of businessIds) {
         try {
           const businessData = await contract.getBusinessData(businessId);
           quizzesList.push({
-            id: businessId,
-            title: businessData.name,
-            question: businessData.description,
+            id: parseInt(businessId.replace('quiz-', '')) || Date.now(),
+            question: businessData.name,
             options: ["Option A", "Option B", "Option C", "Option D"],
-            encryptedAnswer: businessId,
-            publicValue1: Number(businessData.publicValue1) || 0,
-            publicValue2: Number(businessData.publicValue2) || 0,
+            correctAnswer: Number(businessData.publicValue1) || 0,
             creator: businessData.creator,
             timestamp: Number(businessData.timestamp),
+            publicValue1: Number(businessData.publicValue1) || 0,
+            publicValue2: Number(businessData.publicValue2) || 0,
             isVerified: businessData.isVerified,
-            decryptedValue: Number(businessData.decryptedValue) || 0,
-            score: Math.floor(Math.random() * 100) + 1
+            decryptedValue: Number(businessData.decryptedValue) || 0
           });
         } catch (e) {
           console.error('Error loading quiz data:', e);
@@ -129,30 +129,12 @@ const App: React.FC = () => {
       }
       
       setQuizzes(quizzesList);
-      updateScoreboard(quizzesList);
     } catch (e) {
       setTransactionStatus({ visible: true, status: "error", message: "Failed to load data" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     } finally { 
       setIsRefreshing(false); 
     }
-  };
-
-  const updateScoreboard = (quizzesList: QuizData[]) => {
-    const userScores: {[key: string]: number} = {};
-    quizzesList.forEach(quiz => {
-      if (!userScores[quiz.creator]) {
-        userScores[quiz.creator] = 0;
-      }
-      userScores[quiz.creator] += quiz.score;
-    });
-    
-    const sortedScores = Object.entries(userScores)
-      .map(([user, score]) => ({ user, score }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 10);
-    
-    setScoreboard(sortedScores);
   };
 
   const createQuiz = async () => {
@@ -169,17 +151,19 @@ const App: React.FC = () => {
       const contract = await getContractWithSigner();
       if (!contract) throw new Error("Failed to get contract with signer");
       
+      const correctAnswer = newQuizData.correctAnswer;
       const businessId = `quiz-${Date.now()}`;
-      const encryptedResult = await encrypt(contractAddress, address, newQuizData.answer);
+      
+      const encryptedResult = await encrypt(contractAddress, address, correctAnswer);
       
       const tx = await contract.createBusinessData(
         businessId,
-        newQuizData.title,
+        newQuizData.question,
         encryptedResult.encryptedData,
         encryptedResult.proof,
-        newQuizData.options.length,
+        correctAnswer,
         0,
-        newQuizData.question
+        "Quiz Question"
       );
       
       setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction confirmation..." });
@@ -192,7 +176,14 @@ const App: React.FC = () => {
       
       await loadData();
       setShowCreateModal(false);
-      setNewQuizData({ title: "", question: "", options: ["", "", "", ""], answer: 0 });
+      setNewQuizData({ 
+        question: "", 
+        option1: "", 
+        option2: "", 
+        option3: "", 
+        option4: "",
+        correctAnswer: 0
+      });
     } catch (e: any) {
       const errorMessage = e.message?.includes("user rejected transaction") 
         ? "Transaction rejected by user" 
@@ -204,33 +195,82 @@ const App: React.FC = () => {
     }
   };
 
-  const submitAnswer = async (quizId: string, answerIndex: number) => {
-    if (!isConnected || !address) return;
+  const submitAnswer = async (quizId: number, answer: number) => {
+    if (!isConnected || !address) { 
+      setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
+      return; 
+    }
     
-    setIsSubmitting(true);
-    setTransactionStatus({ visible: true, status: "pending", message: "Submitting encrypted answer..." });
+    setTransactionStatus({ visible: true, status: "pending", message: "Encrypting answer with FHE..." });
     
     try {
       const contract = await getContractWithSigner();
       if (!contract) throw new Error("Failed to get contract with signer");
       
-      const encryptedResult = await encrypt(contractAddress, address, answerIndex);
-      const businessId = `answer-${quizId}-${Date.now()}`;
+      const businessId = `quiz-${quizId}`;
+      const encryptedResult = await encrypt(contractAddress, address, answer);
       
       const tx = await contract.createBusinessData(
-        businessId,
-        `Answer for ${quizId}`,
+        `answer-${Date.now()}`,
+        `Answer for ${businessId}`,
         encryptedResult.encryptedData,
         encryptedResult.proof,
-        answerIndex,
-        0,
-        `User answer submission`
+        answer,
+        quizId,
+        "User Answer"
       );
       
+      setTransactionStatus({ visible: true, status: "pending", message: "Submitting encrypted answer..." });
       await tx.wait();
       
-      setUserAnswer(answerIndex);
+      setUserAnswers(prev => ({ ...prev, [quizId]: answer }));
+      
+      const historyEntry = {
+        quizId,
+        answer,
+        timestamp: Date.now(),
+        status: "submitted"
+      };
+      setUserHistory(prev => [...prev, historyEntry]);
+      
       setTransactionStatus({ visible: true, status: "success", message: "Answer submitted successfully!" });
+      setTimeout(() => {
+        setTransactionStatus({ visible: false, status: "pending", message: "" });
+      }, 2000);
+      
+    } catch (e: any) {
+      const errorMessage = e.message?.includes("user rejected transaction") 
+        ? "Transaction rejected by user" 
+        : "Submission failed: " + (e.message || "Unknown error");
+      setTransactionStatus({ visible: true, status: "error", message: errorMessage });
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
+    }
+  };
+
+  const verifyAnswer = async (quizId: number) => {
+    if (!isConnected || !address) return;
+    
+    setTransactionStatus({ visible: true, status: "pending", message: "Verifying answer with FHE..." });
+    
+    try {
+      const contractRead = await getContractReadOnly();
+      const contractWrite = await getContractWithSigner();
+      if (!contractRead || !contractWrite) return;
+      
+      const businessId = `quiz-${quizId}`;
+      const encryptedValueHandle = await contractRead.getEncryptedValue(businessId);
+      
+      const result = await verifyDecryption(
+        [encryptedValueHandle],
+        contractAddress,
+        (abiEncodedClearValues: string, decryptionProof: string) => 
+          contractWrite.verifyDecryption(businessId, abiEncodedClearValues, decryptionProof)
+      );
+      
+      await loadData();
+      
+      setTransactionStatus({ visible: true, status: "success", message: "Answer verified successfully!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
@@ -239,52 +279,9 @@ const App: React.FC = () => {
       setTransactionStatus({ 
         visible: true, 
         status: "error", 
-        message: "Submission failed: " + (e.message || "Unknown error") 
+        message: "Verification failed: " + (e.message || "Unknown error") 
       });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const decryptAnswer = async (quizId: string): Promise<number | null> => {
-    if (!isConnected || !address) return null;
-    
-    setIsDecrypting(true);
-    try {
-      const contractRead = await getContractReadOnly();
-      if (!contractRead) return null;
-      
-      const businessData = await contractRead.getBusinessData(quizId);
-      if (businessData.isVerified) {
-        return Number(businessData.decryptedValue) || 0;
-      }
-      
-      const contractWrite = await getContractWithSigner();
-      if (!contractWrite) return null;
-      
-      const encryptedValueHandle = await contractRead.getEncryptedValue(quizId);
-      
-      const result = await verifyDecryption(
-        [encryptedValueHandle],
-        contractAddress,
-        (abiEncodedClearValues: string, decryptionProof: string) => 
-          contractWrite.verifyDecryption(quizId, abiEncodedClearValues, decryptionProof)
-      );
-      
-      const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
-      await loadData();
-      
-      return Number(clearValue);
-      
-    } catch (e: any) { 
-      if (e.message?.includes("Data already verified")) {
-        await loadData();
-        return null;
-      }
-      return null; 
-    } finally { 
-      setIsDecrypting(false); 
     }
   };
 
@@ -305,27 +302,45 @@ const App: React.FC = () => {
   };
 
   const filteredQuizzes = quizzes.filter(quiz => 
-    quiz.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
     quiz.question.toLowerCase().includes(searchTerm.toLowerCase())
   );
+
+  const userRanking = quizzes.filter(q => q.isVerified).length;
+  const totalSubmissions = userHistory.length;
 
   if (!isConnected) {
     return (
       <div className="app-container">
         <header className="app-header">
           <div className="logo">
-            <h1>FHE Quiz Master 🔐</h1>
+            <h1>🔐 QuizMaster FHE</h1>
+            <p>Privacy-Powered Quiz Game</p>
           </div>
-          <div className="header-actions">
-            <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
-          </div>
+          <ConnectButton />
         </header>
         
         <div className="connection-prompt">
           <div className="connection-content">
-            <div className="connection-icon">🔐</div>
-            <h2>Connect Your Wallet to Start</h2>
-            <p>Join the privacy-preserving quiz competition with FHE encryption</p>
+            <div className="connection-icon">🎯</div>
+            <h2>Welcome to QuizMaster FHE</h2>
+            <p>Connect your wallet to start playing encrypted quizzes powered by Fully Homomorphic Encryption</p>
+            <div className="feature-grid">
+              <div className="feature-card">
+                <span>🔒</span>
+                <h4>Encrypted Answers</h4>
+                <p>All answers are FHE encrypted for maximum privacy</p>
+              </div>
+              <div className="feature-card">
+                <span>⚡</span>
+                <h4>Instant Verification</h4>
+                <p>Homomorphic encryption allows private scoring</p>
+              </div>
+              <div className="feature-card">
+                <span>🏆</span>
+                <h4>Fair Competition</h4>
+                <p>No cheating with encrypted answer verification</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -337,6 +352,7 @@ const App: React.FC = () => {
       <div className="loading-screen">
         <div className="fhe-spinner"></div>
         <p>Initializing FHE Encryption System...</p>
+        <p className="loading-note">Securing your quiz experience</p>
       </div>
     );
   }
@@ -351,192 +367,193 @@ const App: React.FC = () => {
   return (
     <div className="app-container">
       <header className="app-header">
-        <div className="logo">
-          <h1>FHE Quiz Master 🔐</h1>
-          <p>Privacy-Preserving Knowledge Challenge</p>
+        <div className="logo-section">
+          <h1>🎯 QuizMaster FHE</h1>
+          <p>Encrypted Quiz Competition</p>
         </div>
         
         <div className="header-actions">
-          <button onClick={checkAvailability} className="status-btn">
-            Check System
+          <button className="neon-btn" onClick={checkAvailability}>
+            Check FHE Status
           </button>
-          <button onClick={() => setShowCreateModal(true)} className="create-btn">
+          <button className="neon-btn" onClick={() => setShowRanking(true)}>
+            🏆 Ranking
+          </button>
+          <button className="neon-btn primary" onClick={() => setShowCreateModal(true)}>
             + Create Quiz
           </button>
-          <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+          <ConnectButton />
         </div>
       </header>
-      
+
       <div className="main-content">
-        <div className="sidebar">
-          <div className="scoreboard-panel">
-            <h3>🏆 Leaderboard</h3>
-            <div className="scoreboard-list">
-              {scoreboard.map((entry, index) => (
-                <div key={index} className="scoreboard-item">
-                  <span className="rank">{index + 1}</span>
-                  <span className="user">{entry.user.substring(0, 6)}...{entry.user.substring(38)}</span>
-                  <span className="score">{entry.score} pts</span>
-                </div>
-              ))}
-            </div>
+        <div className="stats-bar">
+          <div className="stat-item">
+            <span className="stat-value">{quizzes.length}</span>
+            <span className="stat-label">Total Quizzes</span>
           </div>
-          
-          <div className="fhe-info-panel">
-            <h3>🔐 FHE Protection</h3>
-            <p>All answers are encrypted using Fully Homomorphic Encryption</p>
-            <div className="fhe-steps">
-              <div className="step">1. Encrypt Answer</div>
-              <div className="step">2. Submit to Blockchain</div>
-              <div className="step">3. Homomorphic Scoring</div>
-              <div className="step">4. Privacy Preserved</div>
-            </div>
+          <div className="stat-item">
+            <span className="stat-value">{userRanking}</span>
+            <span className="stat-label">Your Score</span>
+          </div>
+          <div className="stat-item">
+            <span className="stat-value">{totalSubmissions}</span>
+            <span className="stat-label">Submissions</span>
           </div>
         </div>
-        
-        <div className="content-area">
-          <div className="search-section">
-            <input
-              type="text"
-              placeholder="Search quizzes..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="search-input"
-            />
-            <button onClick={loadData} disabled={isRefreshing} className="refresh-btn">
-              {isRefreshing ? "Refreshing..." : "Refresh"}
-            </button>
-          </div>
-          
-          <div className="quizzes-grid">
-            {filteredQuizzes.map((quiz, index) => (
-              <div key={index} className="quiz-card">
-                <div className="quiz-header">
-                  <h3>{quiz.title}</h3>
-                  <span className="score-badge">{quiz.score} pts</span>
-                </div>
-                <p className="quiz-question">{quiz.question}</p>
-                <div className="quiz-options">
-                  {quiz.options.map((option, optIndex) => (
-                    <button
-                      key={optIndex}
-                      onClick={() => submitAnswer(quiz.id, optIndex)}
-                      disabled={isSubmitting || userAnswer !== null}
-                      className={`option-btn ${userAnswer === optIndex ? 'selected' : ''}`}
-                    >
-                      {option}
-                    </button>
-                  ))}
-                </div>
-                <div className="quiz-footer">
-                  <span>By: {quiz.creator.substring(0, 6)}...{quiz.creator.substring(38)}</span>
-                  <button 
-                    onClick={() => decryptAnswer(quiz.id)}
-                    disabled={isDecrypting}
-                    className="decrypt-btn"
-                  >
-                    {quiz.isVerified ? "✅ Verified" : "🔓 Verify"}
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-          
-          {filteredQuizzes.length === 0 && (
-            <div className="no-quizzes">
-              <p>No quizzes found. Create the first one!</p>
-              <button onClick={() => setShowCreateModal(true)} className="create-btn">
-                Create Quiz
-              </button>
-            </div>
-          )}
+
+        <div className="search-section">
+          <input
+            type="text"
+            placeholder="🔍 Search quizzes..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="search-input"
+          />
+          <button onClick={loadData} className="refresh-btn">
+            {isRefreshing ? "🔄" : "Refresh"}
+          </button>
         </div>
-      </div>
-      
-      {showCreateModal && (
-        <div className="modal-overlay">
-          <div className="create-quiz-modal">
-            <div className="modal-header">
-              <h2>Create New Quiz</h2>
-              <button onClick={() => setShowCreateModal(false)} className="close-modal">&times;</button>
-            </div>
-            
-            <div className="modal-body">
-              <div className="form-group">
-                <label>Quiz Title</label>
-                <input 
-                  type="text" 
-                  value={newQuizData.title}
-                  onChange={(e) => setNewQuizData({...newQuizData, title: e.target.value})}
-                  placeholder="Enter quiz title..."
-                />
+
+        <div className="quizzes-grid">
+          {filteredQuizzes.map((quiz) => (
+            <div key={quiz.id} className="quiz-card">
+              <div className="quiz-header">
+                <h3>{quiz.question}</h3>
+                <span className="quiz-meta">By {quiz.creator.slice(0, 8)}...</span>
               </div>
               
-              <div className="form-group">
-                <label>Question</label>
-                <textarea 
-                  value={newQuizData.question}
-                  onChange={(e) => setNewQuizData({...newQuizData, question: e.target.value})}
-                  placeholder="Enter your question..."
-                  rows={3}
-                />
-              </div>
-              
-              <div className="form-group">
-                <label>Options</label>
-                {newQuizData.options.map((option, index) => (
-                  <input
+              <div className="quiz-options">
+                {quiz.options.map((option, index) => (
+                  <button
                     key={index}
-                    type="text"
-                    value={option}
-                    onChange={(e) => {
-                      const newOptions = [...newQuizData.options];
-                      newOptions[index] = e.target.value;
-                      setNewQuizData({...newQuizData, options: newOptions});
-                    }}
-                    placeholder={`Option ${String.fromCharCode(65 + index)}`}
-                  />
+                    className={`option-btn ${userAnswers[quiz.id] === index ? 'selected' : ''}`}
+                    onClick={() => submitAnswer(quiz.id, index)}
+                  >
+                    {option}
+                  </button>
                 ))}
               </div>
-              
-              <div className="form-group">
-                <label>Correct Answer (0-3)</label>
-                <input 
-                  type="number"
-                  min="0"
-                  max="3"
-                  value={newQuizData.answer}
-                  onChange={(e) => setNewQuizData({...newQuizData, answer: parseInt(e.target.value) || 0})}
-                />
+
+              <div className="quiz-footer">
+                <div className="quiz-status">
+                  {quiz.isVerified ? (
+                    <span className="status-verified">✅ Verified</span>
+                  ) : (
+                    <span className="status-pending">🔒 Encrypted</span>
+                  )}
+                </div>
+                <button 
+                  className="verify-btn"
+                  onClick={() => verifyAnswer(quiz.id)}
+                >
+                  Verify Answer
+                </button>
               </div>
             </div>
-            
+          ))}
+        </div>
+
+        {filteredQuizzes.length === 0 && (
+          <div className="empty-state">
+            <p>No quizzes found. Create the first one!</p>
+            <button className="neon-btn" onClick={() => setShowCreateModal(true)}>
+              Create Quiz
+            </button>
+          </div>
+        )}
+      </div>
+
+      {showCreateModal && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <div className="modal-header">
+              <h2>Create New Quiz</h2>
+              <button onClick={() => setShowCreateModal(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <input
+                type="text"
+                placeholder="Question"
+                value={newQuizData.question}
+                onChange={(e) => setNewQuizData({...newQuizData, question: e.target.value})}
+              />
+              <input
+                type="text"
+                placeholder="Option 1"
+                value={newQuizData.option1}
+                onChange={(e) => setNewQuizData({...newQuizData, option1: e.target.value})}
+              />
+              <input
+                type="text"
+                placeholder="Option 2"
+                value={newQuizData.option2}
+                onChange={(e) => setNewQuizData({...newQuizData, option2: e.target.value})}
+              />
+              <input
+                type="text"
+                placeholder="Option 3"
+                value={newQuizData.option3}
+                onChange={(e) => setNewQuizData({...newQuizData, option3: e.target.value})}
+              />
+              <input
+                type="text"
+                placeholder="Option 4"
+                value={newQuizData.option4}
+                onChange={(e) => setNewQuizData({...newQuizData, option4: e.target.value})}
+              />
+              <select
+                value={newQuizData.correctAnswer}
+                onChange={(e) => setNewQuizData({...newQuizData, correctAnswer: parseInt(e.target.value)})}
+              >
+                <option value={0}>Option 1</option>
+                <option value={1}>Option 2</option>
+                <option value={2}>Option 3</option>
+                <option value={3}>Option 4</option>
+              </select>
+            </div>
             <div className="modal-footer">
-              <button onClick={() => setShowCreateModal(false)} className="cancel-btn">Cancel</button>
+              <button onClick={() => setShowCreateModal(false)}>Cancel</button>
               <button 
                 onClick={createQuiz}
                 disabled={creatingQuiz || isEncrypting}
-                className="submit-btn"
+                className="primary"
               >
-                {creatingQuiz || isEncrypting ? "Creating..." : "Create Quiz"}
+                {creatingQuiz ? "Creating..." : "Create Quiz"}
               </button>
             </div>
           </div>
         </div>
       )}
-      
-      {transactionStatus.visible && (
-        <div className="transaction-modal">
-          <div className="transaction-content">
-            <div className={`transaction-icon ${transactionStatus.status}`}>
-              {transactionStatus.status === "pending" && <div className="fhe-spinner"></div>}
-              {transactionStatus.status === "success" && "✓"}
-              {transactionStatus.status === "error" && "✗"}
+
+      {showRanking && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <div className="modal-header">
+              <h2>🏆 Player Ranking</h2>
+              <button onClick={() => setShowRanking(false)}>×</button>
             </div>
-            <div className="transaction-message">{transactionStatus.message}</div>
+            <div className="ranking-list">
+              <div className="ranking-item">
+                <span>1. You</span>
+                <span>{userRanking} points</span>
+              </div>
+            </div>
           </div>
         </div>
       )}
+
+      {transactionStatus.visible && (
+        <div className="notification">
+          <div className={`notification-content ${transactionStatus.status}`}>
+            {transactionStatus.message}
+          </div>
+        </div>
+      )}
+
+      <footer className="app-footer">
+        <p>🔐 Powered by FHE Technology - Your answers are always encrypted</p>
+      </footer>
     </div>
   );
 };
